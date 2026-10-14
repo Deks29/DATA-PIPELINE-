@@ -4,7 +4,6 @@
 
 *Authors:* John Patrick Russel D. Lalo, Dexter T. Manalo, Hazel Ann D. Manimtim
 
-*Date:* October 7, 2026
 
 ---
 
