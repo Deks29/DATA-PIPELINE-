@@ -5,8 +5,6 @@
 *Authors:* John Patrick Russel D. Lalo, Dexter T. Manalo, Hazel Ann D. Manimtim
 
 
----
-
 ## Objective
 
 Extract one business day of records from SightSync operational sources (raw CSV/JSON log files and transactional records), verify that the extraction is complete and reliable, and package it for the Transformation stage (PySpark & dbt Core).
