@@ -1,0 +1,99 @@
+# SightSync Batch Pipeline - Stage 1 (Data Extraction)
+# Airflow in Docker. Start with:
+#   docker compose -f docker/docker-compose.yml up airflow-init
+#   docker compose -f docker/docker-compose.yml up
+#
+# Airflow UI: http://localhost:8080  (user/pass: airflow/airflow)
+#
+# NOTE: requires a .env file providing AIRFLOW_UID and the Fernet key. See the
+# comments below; for a quick Windows/Linux start the defaults are fine.
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # Extraction engine reads its paths from here.
+    PYTHONPATH: /opt/airflow
+    SIGHTSYNC_BASE_DIR: /opt/airflow
+    SIGHTSYNC_RAW_DIR: /opt/airflow/data/raw
+    SIGHTSYNC_STAGING_DIR: /opt/airflow/data/staging
+    SIGHTSYNC_LOGS_DIR: /opt/airflow/data/logs
+    SIGHTSYNC_METADATA_DB: /opt/airflow/data/metadata/sightsync_audit.db
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../extraction:/opt/airflow/extraction
+    - ../scripts:/opt/airflow/scripts
+    - ../data:/opt/airflow/data
+    - ../logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username airflow \
+          --password airflow \
+          --firstname Sight \
+          --lastname Sync \
+          --role Admin \
+          --email admin@sightsync.local
+        airflow dags list || true
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+
+volumes:
+  postgres-db-volume:
