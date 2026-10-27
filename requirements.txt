@@ -1,0 +1,6 @@
+# Stage 1 - Data Extraction (SightSync Batch Pipeline)
+# Core extraction engine
+polars>=1.0,<2.0
+
+# Orchestration (installed in the Airflow Docker image - see docker/Dockerfile)
+apache-airflow>=2.9,<3.0

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Generated data / artifacts (Stage 1 outputs)
+data/raw/
+data/staging/
+data/logs/
+data/metadata/
+logs/
+
+# Airflow
+airflow.cfg
+airflow.db
+standalone_admin_password.txt
+
+# OS
+Thumbs.db
+.DS_Store
