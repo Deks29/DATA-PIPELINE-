@@ -68,6 +68,24 @@ Entity and transactional metadata. *Primary Key:* entity_id (String). Source for
 | status | String | String | Latest status of the entity (e.g., active, completed). |
 | created_at | Timestamp | Timestamp | Record creation timestamp. |
 
+### 2.3 staging.hb_pitc (Real Data Source)
+
+NHS Health Board prescribing data supplied as `hb_pitc<YYYY>_<MM>.csv` (for example `hb_pitc2026_07.csv`). The grain is health board x dispensed item x prescribed type x paid month. *Composite Primary Key:* HBT + DMDCode + BNFItemCode + PrescribedType + PaidDateMonth. BNF/DMD codes are null for aggregate rows, so null key values are permitted for this contract.
+
+| Column | Source Type | Target Type | Purpose |
+| --- | --- | --- | --- |
+| HBT | String | String | Health board code. |
+| DMDCode | Integer | Integer | Dictionary of Medicines and Devices code (null for aggregates). |
+| BNFItemCode | String | String | BNF item code (null for aggregates). |
+| BNFItemDescription | String | String | BNF item description. |
+| PrescribedType | String | String | AMP, VMP, AMPP or VMPP. |
+| NumberOfPaidItems | Integer | Integer | Paid item count. |
+| PaidQuantity | Float | Float | Paid quantity. |
+| GrossIngredientCost | Float | Float | Gross ingredient cost. |
+| PaidDateMonth | Integer (YYYYMM) | Timestamp (UTC, month start) | Period used for the monthly extraction window and business_date partition. |
+
+The extraction window for this table is the full calendar month of `business_date`; the 3-day trailing look-back applies only to the daily log tables.
+
 ## 3. Extraction Validation and Data Quality Checks
 
 | # | Check Name | Target | Criteria | Severity |

@@ -212,6 +212,54 @@ class PipelineTestCase(unittest.TestCase):
         log_files = list((self.settings.logs_dir / BDATE.isoformat()).glob("*.json"))
         self.assertEqual(len(log_files), 1)
 
+    # -- HB PITC -----------------------------------------------------------------
+
+    def _write_prescriptions(self, rows: list[tuple]) -> None:
+        d = self.settings.raw_dir_for("hb_pitc")
+        d.mkdir(parents=True, exist_ok=True)
+        header = (
+            "HBT,DMDCode,BNFItemCode,BNFItemDescription,PrescribedType,"
+            "NumberOfPaidItems,PaidQuantity,GrossIngredientCost,PaidDateMonth\n"
+        )
+        text = "\n".join(",".join(str(value) for value in row) for row in rows)
+        (d / "hb_pitc2026_07.csv").write_text(header + text + "\n", encoding="utf-8")
+
+    def test_hb_pitc_month_window_and_composite_key(self):
+        self._write_prescriptions(
+            [
+                (
+                    "S08000015", "1001011000001106", "0603020J0AAAEAE",
+                    "HYDROCORTISONE 20MG TABLETS", "VMP", 31, 1394, 179.42, 202607,
+                ),
+                ("S08000015", "", "", "", "AMP", 35, 9743.5, 7276.7, 202607),
+                (
+                    "S08000015", "1001011000001106", "0603020J0AAAEAE",
+                    "HYDROCORTISONE 20MG TABLETS", "VMP", 10, 500, 50.0, 202606,
+                ),
+            ]
+        )
+        result = self.pipeline.extract(date(2026, 7, 1), "hb_pitc")
+        self.assertEqual(result.decision, APPROVED)
+        self.assertEqual(result.rows_read, 2)
+        self.assertEqual(result.rows_extracted, 2)
+        self.assertEqual(result.check_map["V4"], PASS)
+        self.assertEqual(result.check_map["V5"], PASS)
+
+        parquet = Path(result.parquet_path)
+        self.assertEqual(parquet.parent.name, "business_date=2026-07-01")
+        out = pl.read_parquet(parquet)
+        self.assertEqual(out["PaidDateMonth"].unique().to_list(), [datetime(2026, 7, 1, tzinfo=timezone.utc)])
+
+    def test_hb_pitc_duplicate_composite_key_rejected(self):
+        row = (
+            "S08000015", "1001011000001106", "0603020J0AAAEAE",
+            "HYDROCORTISONE 20MG TABLETS", "VMP", 31, 1394, 179.42, 202607,
+        )
+        self._write_prescriptions([row, row])
+        result = self.pipeline.extract(date(2026, 7, 1), "hb_pitc")
+        self.assertEqual(result.decision, REJECTED)
+        self.assertEqual(result.check_map["V5"], FAIL)
+
 
 if __name__ == "__main__":
     unittest.main()

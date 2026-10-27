@@ -55,6 +55,18 @@ def _parse_timestamp_string(column: str) -> pl.Expr:
         .str.to_datetime(format=_DATETIME_FORMAT, strict=False, time_unit="us")
     )
 
+def _yyyymm_expr(column: str) -> pl.Expr:
+    """Convert an integer ``YYYYMM`` period to a UTC datetime at month start."""
+    return (
+        pl.col(column)
+        .cast(pl.String)
+        .str.to_date(format="%Y%m", strict=False)
+        .cast(pl.Datetime("us"))
+        .dt.replace_time_zone("UTC")
+        .alias(column)
+    )
+
+
 APPROVED = "APPROVED"
 APPROVED_WITH_WARNING = "APPROVED WITH WARNING"
 REJECTED = "REJECTED"
@@ -231,7 +243,7 @@ class ExtractionPipeline:
 
         # -- read, normalise and apply the incremental window -----------------
         df = self._normalise(lf, spec)
-        window_start, window_end = self._window(bdate)
+        window_start, window_end = self._window(bdate, spec)
         ts_col = spec.timestamp_column
         in_window = df.filter(
             pl.col(ts_col).is_not_null()
@@ -240,17 +252,24 @@ class ExtractionPipeline:
         )
         rows_read = in_window.height
 
-        valid = in_window.filter(
-            pl.col(spec.primary_key).is_not_null() & pl.col(ts_col).is_not_null()
-        )
+        valid_mask = pl.col(ts_col).is_not_null()
+        if not spec.allow_null_keys:
+            valid_mask = valid_mask & pl.all_horizontal(
+                [pl.col(key).is_not_null() for key in spec.primary_keys]
+            )
+        valid = in_window.filter(valid_mask)
         rows_rejected = rows_read - valid.height
         rows_extracted = valid.height
 
         # -- V4 / V5 ----------------------------------------------------------
         # V4 checks the raw in-window source (key integrity); V5 checks the
         # de-duplicated/cleaned rows that will actually be extracted.
-        checks.append(check_key_integrity(in_window, spec.primary_key))
-        checks.append(check_primary_key_uniqueness(valid, spec.primary_key))
+        checks.append(
+            check_key_integrity(
+                in_window, spec.primary_keys, allow_nulls=spec.allow_null_keys
+            )
+        )
+        checks.append(check_primary_key_uniqueness(valid, spec.primary_keys))
 
         critical_ok = not any(c.status == FAIL and c.severity == CRITICAL for c in checks)
         written_rows = 0
@@ -310,6 +329,10 @@ class ExtractionPipeline:
     ) -> float | None:
         """Fraction of non-null values parseable as datetimes (None if temporal)."""
 
+        if spec.timestamp_format == "yyyymm":
+            parsed = lf.select(_yyyymm_expr(spec.timestamp_column).is_not_null().mean()).collect()
+            return float(parsed.item() or 0.0)
+
         string_ts = [c for c in spec.timestamp_columns if schema.get(c) == pl.String]
         if not string_ts:
             return None
@@ -329,7 +352,10 @@ class ExtractionPipeline:
                 exprs.append(pl.col(column).cast(pl.String))
         for column in spec.timestamp_columns:
             if column in df.columns:
-                exprs.append(self._timestamp_expr(column, df.schema[column]))
+                if spec.timestamp_format == "yyyymm":
+                    exprs.append(_yyyymm_expr(column))
+                else:
+                    exprs.append(self._timestamp_expr(column, df.schema[column]))
         if exprs:
             # keep only contracted columns + control-ready ones
             keep = [c for c in spec.required_columns if c in df.columns]
@@ -353,7 +379,15 @@ class ExtractionPipeline:
             col = col.cast(pl.Datetime("us")).dt.replace_time_zone("UTC")
         return col.dt.cast_time_unit("us").alias(column)
 
-    def _window(self, bdate: date) -> tuple[datetime, datetime]:
+    def _window(self, bdate: date, spec: TableSpec) -> tuple[datetime, datetime]:
+        if spec.window_mode == "month":
+            start_day = bdate.replace(day=1)
+            next_month = (start_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+            start = datetime.combine(start_day, time.min).replace(tzinfo=timezone.utc)
+            end = datetime.combine(
+                next_month - timedelta(days=1), time.max
+            ).replace(tzinfo=timezone.utc)
+            return start, end
         start_day = bdate - timedelta(days=self.settings.lookback_days)
         start = datetime.combine(start_day, time.min).replace(tzinfo=timezone.utc)
         end = datetime.combine(bdate, time.max).replace(tzinfo=timezone.utc)

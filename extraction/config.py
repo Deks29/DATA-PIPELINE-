@@ -14,7 +14,9 @@ from typing import Literal
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-ColumnKind = Literal["string", "timestamp"]
+ColumnKind = Literal["string", "timestamp", "integer", "float"]
+TimestampFormat = Literal["iso", "yyyymm"]
+WindowMode = Literal["trailing", "month"]
 
 
 @dataclass(frozen=True)
@@ -23,10 +25,17 @@ class TableSpec:
 
     name: str
     file_glob: str
-    primary_key: str
+    primary_keys: tuple[str, ...]
     timestamp_column: str
     required_columns: dict[str, ColumnKind]
     partition_column: str = "business_date"
+    timestamp_format: TimestampFormat = "iso"
+    window_mode: WindowMode = "trailing"
+    allow_null_keys: bool = False
+
+    @property
+    def primary_key(self) -> str:
+        return self.primary_keys[0]
 
     @property
     def string_columns(self) -> list[str]:
@@ -42,7 +51,7 @@ class TableSpec:
 RAW_LOGS = TableSpec(
     name="staging.raw_logs",
     file_glob="raw_logs_*.{ext}",
-    primary_key="log_id",
+    primary_keys=("log_id",),
     timestamp_column="timestamp",
     required_columns={
         "log_id": "string",
@@ -56,7 +65,7 @@ RAW_LOGS = TableSpec(
 RAW_ENTITIES = TableSpec(
     name="staging.raw_entities",
     file_glob="raw_entities_*.{ext}",
-    primary_key="entity_id",
+    primary_keys=("entity_id",),
     timestamp_column="created_at",
     required_columns={
         "entity_id": "string",
@@ -66,9 +75,34 @@ RAW_ENTITIES = TableSpec(
     },
 )
 
+# NHS Health Board prescribing data (HB PITC). The grain is health board x
+# dispensed item x prescribed type x paid month; BNF/DMD codes are null for
+# aggregate rows, so null key values are allowed by this contract.
+HB_PITC = TableSpec(
+    name="staging.hb_pitc",
+    file_glob="hb_pitc*.{ext}",
+    primary_keys=("HBT", "DMDCode", "BNFItemCode", "PrescribedType", "PaidDateMonth"),
+    timestamp_column="PaidDateMonth",
+    timestamp_format="yyyymm",
+    window_mode="month",
+    allow_null_keys=True,
+    required_columns={
+        "HBT": "string",
+        "DMDCode": "integer",
+        "BNFItemCode": "string",
+        "BNFItemDescription": "string",
+        "PrescribedType": "string",
+        "NumberOfPaidItems": "integer",
+        "PaidQuantity": "float",
+        "GrossIngredientCost": "float",
+        "PaidDateMonth": "timestamp",
+    },
+)
+
 TABLES: dict[str, TableSpec] = {
     "raw_logs": RAW_LOGS,
     "raw_entities": RAW_ENTITIES,
+    "hb_pitc": HB_PITC,
 }
 
 # Section 1.2 - Source Format & Connection

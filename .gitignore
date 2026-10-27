@@ -10,6 +10,7 @@ data/raw/
 data/staging/
 data/logs/
 data/metadata/
+data/exports/
 logs/
 
 # Airflow

@@ -7,6 +7,7 @@ pipeline consumes these results to produce the handover decision (Section 7).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -124,6 +125,14 @@ def _is_temporal(dtype: pl.DataType) -> bool:
     return dtype in (pl.Date, pl.Datetime)
 
 
+def _is_integer(dtype: pl.DataType) -> bool:
+    return dtype.is_integer()
+
+
+def _is_float(dtype: pl.DataType) -> bool:
+    return dtype.is_float()
+
+
 def check_schema_drift(
     schema: pl.Schema,
     spec: TableSpec,
@@ -141,10 +150,22 @@ def check_schema_drift(
             if not _is_string_like(dtype):
                 # Untyped sources that infer a numeric key are schema drift.
                 drifted.append(f"{column}: expected String, got {dtype}")
+        elif kind == "integer":
+            if not _is_integer(dtype):
+                drifted.append(f"{column}: expected Integer, got {dtype}")
+        elif kind == "float":
+            if not (_is_integer(dtype) or _is_float(dtype)):
+                drifted.append(f"{column}: expected Float, got {dtype}")
         else:  # timestamp
             if _is_temporal(dtype):
                 continue
             if _is_string_like(dtype) and (timestamp_parse_rate or 0.0) >= 1.0:
+                continue
+            if (
+                spec.timestamp_format == "yyyymm"
+                and _is_integer(dtype)
+                and (timestamp_parse_rate or 0.0) >= 1.0
+            ):
                 continue
             drifted.append(
                 f"{column}: expected Timestamp, got {dtype}"
@@ -186,30 +207,53 @@ def check_window_resolution(
 # --------------------------------------------------------------------------- #
 # V4 - Key Integrity
 # --------------------------------------------------------------------------- #
-def check_key_integrity(df: pl.DataFrame, primary_key: str) -> CheckResult:
-    if primary_key not in df.columns:
-        return _result("V4", FAIL, f"Primary key {primary_key} missing from parsed data.")
-    null_count = df.get_column(primary_key).null_count()
-    if null_count > 0:
-        return _result("V4", FAIL, f"{null_count} null value(s) in primary key {primary_key}.")
-    return _result("V4", PASS, f"No null values in primary key {primary_key}.")
+def _key_columns(primary_key: str | Sequence[str]) -> tuple[str, ...]:
+    return (primary_key,) if isinstance(primary_key, str) else tuple(primary_key)
+
+
+def check_key_integrity(
+    df: pl.DataFrame,
+    primary_key: str | Sequence[str],
+    allow_nulls: bool = False,
+) -> CheckResult:
+    keys = _key_columns(primary_key)
+    missing = [key for key in keys if key not in df.columns]
+    if missing:
+        return _result("V4", FAIL, f"Primary key column(s) {missing} missing from parsed data.")
+    nulls = {key: df.get_column(key).null_count() for key in keys}
+    total_null = sum(nulls.values())
+    if allow_nulls:
+        detail = (
+            f"{total_null} null key value(s) permitted by the contract for {list(keys)}."
+            if total_null
+            else f"No null values in key columns {list(keys)}."
+        )
+        return _result("V4", PASS, detail)
+    if total_null > 0:
+        detail = ", ".join(f"{key}={count}" for key, count in nulls.items() if count)
+        return _result("V4", FAIL, f"Null value(s) in primary key column(s): {detail}.")
+    return _result("V4", PASS, f"No null values in primary key column(s) {list(keys)}.")
 
 
 # --------------------------------------------------------------------------- #
 # V5 - Primary Key Uniqueness
 # --------------------------------------------------------------------------- #
-def check_primary_key_uniqueness(df: pl.DataFrame, primary_key: str) -> CheckResult:
-    if primary_key not in df.columns:
-        return _result("V5", FAIL, f"Primary key {primary_key} missing from parsed data.")
+def check_primary_key_uniqueness(
+    df: pl.DataFrame, primary_key: str | Sequence[str]
+) -> CheckResult:
+    keys = _key_columns(primary_key)
+    missing = [key for key in keys if key not in df.columns]
+    if missing:
+        return _result("V5", FAIL, f"Primary key column(s) {missing} missing from parsed data.")
     total = df.height
-    distinct = df.get_column(primary_key).n_unique()
+    distinct = df.select(list(keys)).unique().height
     if distinct != total:
         return _result(
             "V5",
             FAIL,
-            f"Duplicate primary keys detected: {total - distinct} duplicate row(s) in {primary_key}.",
+            f"Duplicate primary keys detected: {total - distinct} duplicate row(s) in {list(keys)}.",
         )
-    return _result("V5", PASS, f"All {total} {primary_key} values are unique.")
+    return _result("V5", PASS, f"All {total} rows have unique key {list(keys)}.")
 
 
 # --------------------------------------------------------------------------- #

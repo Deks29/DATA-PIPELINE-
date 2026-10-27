@@ -2,5 +2,8 @@
 # Core extraction engine
 polars>=1.0,<2.0
 
+# Excel export of staging data (scripts/export_excel.py)
+xlsxwriter>=3.2,<4.0
+
 # Orchestration (installed in the Airflow Docker image - see docker/Dockerfile)
 apache-airflow>=2.9,<3.0
