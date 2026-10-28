@@ -1,4 +1,4 @@
-# SightSync Batch Pipeline - Stage 1 (Data Extraction)
+# SightSync Batch Pipeline - Stage 1 (Data Extraction) + Stage 2 (Transformation)
 # Airflow in Docker. Start with:
 #   docker compose -f docker/docker-compose.yml up airflow-init
 #   docker compose -f docker/docker-compose.yml up
@@ -27,9 +27,22 @@ x-airflow-common: &airflow-common
     SIGHTSYNC_STAGING_DIR: /opt/airflow/data/staging
     SIGHTSYNC_LOGS_DIR: /opt/airflow/data/logs
     SIGHTSYNC_METADATA_DB: /opt/airflow/data/metadata/sightsync_audit.db
+    # Stage 2 transformation paths.
+    SIGHTSYNC_TRANSFORM_STAGING_DIR: /opt/airflow/data/staging
+    SIGHTSYNC_TRANSFORM_OUTPUT_DIR: /opt/airflow/data/transformed
+    SIGHTSYNC_TRANSFORM_QUARANTINE_DIR: /opt/airflow/data/quarantine
+    SIGHTSYNC_TRANSFORM_LOGS_DIR: /opt/airflow/data/logs/transformation
+    SIGHTSYNC_TRANSFORM_METADATA_DB: /opt/airflow/data/metadata/sightsync_transform_audit.db
+    SIGHTSYNC_TRANSFORM_LOOKBACK_DAYS: "3"
+    # openFDA API source (values come from the project .env file).
+    API: ${API:-}
+    API_SEARCH: ${API_SEARCH:-product_code:NOB}
+    API_LIMIT: ${API_LIMIT:-500}
+    API_KEY: ${API_KEY:-}
   volumes:
     - ../dags:/opt/airflow/dags
     - ../extraction:/opt/airflow/extraction
+    - ../transformation:/opt/airflow/transformation
     - ../scripts:/opt/airflow/scripts
     - ../data:/opt/airflow/data
     - ../logs:/opt/airflow/logs

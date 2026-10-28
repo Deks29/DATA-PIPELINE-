@@ -1,10 +1,11 @@
-"""Airflow DAG: SightSync Nightly Analytics - Stage 1 (Data Extraction).
+"""Airflow DAG: SightSync Nightly Analytics - Stage 1 extraction + Stage 2 transformation.
 
 Schedule: daily at 02:00 UTC / 10:00 Asia/Manila.
 Retries:  up to 3 times before triggering the engineer alert (Section 7).
 
-The DAG is a thin orchestrator: all extraction logic lives in the standalone
-``extraction`` package so it can be unit tested and run without Airflow.
+The DAG is a thin orchestrator: all extraction and transformation logic lives in
+the standalone ``extraction`` and ``transformation`` packages so it can be unit
+tested and run without Airflow.
 """
 
 from __future__ import annotations
@@ -27,6 +28,14 @@ from extraction.pipeline import (
     ExtractionPipeline,
     to_json,
 )
+from transformation.config import load_transform_settings
+from transformation.metadata import TransformMetadataStore
+from transformation.pipeline import (
+    APPROVED as T_APPROVED,
+    MANUAL_REVIEW as T_MANUAL_REVIEW,
+    REJECTED as T_REJECTED,
+    TransformationPipeline,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,13 +53,13 @@ default_args = {
 
 with DAG(
     dag_id="sightsync_nightly_analytics",
-    description="SightSync Stage 1 - Polars data extraction to Parquet staging",
+    description="SightSync Stage 1 extraction + Stage 2 Polars transformation",
     default_args=default_args,
     schedule="0 2 * * *",  # 02:00 UTC == 10:00 Asia/Manila
     start_date=datetime(2026, 10, 1),
     catchup=True,
     max_active_runs=1,
-    tags=["sightsync", "stage-1", "extraction", "polars"],
+    tags=["sightsync", "stage-1", "stage-2", "extraction", "transformation", "polars"],
 ) as dag:
 
     @task
@@ -96,18 +105,70 @@ with DAG(
                     s["table_name"],
                     json.dumps(s["validation_results"]),
                 )
-        log.info("All tables APPROVED - handing Parquet staging files to PySpark.")
+        log.info("All tables APPROVED - handing Parquet staging files to Stage 2 transformation.")
+
+    @task
+    def transform(**context) -> dict:
+        """Run Stage 2 on the validated staging handover for the business date."""
+        business_date = context["ds"]
+        pipeline = TransformationPipeline(settings=load_transform_settings())
+        results = pipeline.run(business_date, force=True)
+        if not results:
+            raise AirflowFailException("Stage 2 produced no transformation results.")
+
+        decision = results[0].decision
+        summary = {
+            "run_id": results[0].run_id,
+            "business_date": business_date,
+            "decision": decision,
+            "tables": [
+                {
+                    "table": r.table_name,
+                    "status": r.status,
+                    "records_read": r.records_read,
+                    "records_output": r.records_output,
+                    "records_rejected": r.records_rejected,
+                    "output_path": r.output_path,
+                }
+                for r in results
+            ],
+        }
+        log.info("Transformation summary:\n%s", json.dumps(summary, indent=2))
+
+        if decision == T_REJECTED:
+            raise AirflowFailException(
+                "Stage 2 REJECTED - transformed outputs were not published. "
+                + "; ".join(
+                    f"{c.check_id}: {c.detail}" for c in results[0].checks if c.status == "FAIL"
+                )
+            )
+        if decision == T_MANUAL_REVIEW:
+            raise AirflowFailException(
+                "Stage 2 MANUAL REVIEW required - Data Lead approval needed before publishing."
+            )
+        if decision == T_APPROVED:
+            log.info("Stage 2 APPROVED - analytics dimensional model published.")
+        return summary
 
     @task
     def purge_retention() -> dict:
-        """Section 5 - enforce operational log / audit retention policy."""
+        """Section 5 / Stage 2 Section 9 - enforce log, audit and quarantine retention."""
         store = MetadataStore(SETTINGS.metadata_db, SETTINGS.logs_dir)
         removed = store.purge_expired(
             SETTINGS.operational_log_retention_days, SETTINGS.audit_retention_months
         )
-        log.info("Retention purge: %s", removed)
-        return removed
+        transform_settings = load_transform_settings()
+        transform_store = TransformMetadataStore(
+            transform_settings.metadata_db,
+            transform_settings.logs_dir,
+            transform_settings.quarantine_dir,
+        )
+        removed_transform = transform_store.purge_expired(90, 24, 24)
+        log.info("Retention purge: extraction=%s transformation=%s", removed, removed_transform)
+        return {"extraction": removed, "transformation": removed_transform}
 
     summaries = extract()
-    evaluate(summaries)
-    purge_retention()
+    gate = evaluate(summaries)
+    transformed = transform()
+    gate >> transformed
+    transformed >> purge_retention()
