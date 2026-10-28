@@ -17,6 +17,7 @@ from pathlib import Path
 
 import polars as pl
 
+from extraction.api import fetch_to_ndjson
 from extraction.config import SUPPORTED_EXTENSIONS, TABLES, Settings, TableSpec, load_settings
 from extraction.metadata import ExtractionMetadata, MetadataStore, utcnow
 from extraction.validations import (
@@ -62,6 +63,18 @@ def _yyyymm_expr(column: str) -> pl.Expr:
         .cast(pl.String)
         .str.to_date(format="%Y%m", strict=False)
         .cast(pl.Datetime("us"))
+        .dt.replace_time_zone("UTC")
+        .alias(column)
+    )
+
+
+def _date_expr(column: str) -> pl.Expr:
+    """Convert a ``YYYY-MM-DD`` date string to a UTC datetime at midnight."""
+    return (
+        pl.col(column)
+        .cast(pl.String)
+        .str.strip_chars()
+        .str.to_datetime(format="%Y-%m-%d", strict=False, time_unit="us")
         .dt.replace_time_zone("UTC")
         .alias(column)
     )
@@ -178,7 +191,7 @@ class ExtractionPipeline:
                 message = "No readable source files."
             else:
                 decision, checks, rows_read, rows_extracted, rows_rejected, parquet_path, message = (
-                    self._extract_validated(run_id, bdate, key, spec, files, force)
+                    self._extract_validated(run_id, bdate, key, spec, files, force, checks)
                 )
         except Exception as exc:  # noqa: BLE001 - audit every failure
             checks.extend(self._skip_rest(checks[-1].check_id if checks else "", str(exc)))
@@ -223,8 +236,9 @@ class ExtractionPipeline:
         spec: TableSpec,
         files: list[Path],
         force: bool,
+        checks: list[CheckResult] | None = None,
     ):
-        checks: list[CheckResult] = []
+        checks = checks if checks is not None else []
 
         # -- V2: parse schema and detect drift --------------------------------
         lf = self._scan(files)
@@ -300,6 +314,8 @@ class ExtractionPipeline:
     # -- I/O helpers ----------------------------------------------------------
 
     def _discover_files(self, spec: TableSpec) -> list[Path]:
+        if spec.source == "api":
+            return self._fetch_api_source(spec)
         raw_dir = self.settings.raw_dir_for(spec.name.split(".")[-1])
         if not raw_dir.exists():
             return []
@@ -307,6 +323,21 @@ class ExtractionPipeline:
         for ext in SUPPORTED_EXTENSIONS:
             files.extend(sorted(raw_dir.glob(spec.file_glob.format(ext=ext))))
         return files
+
+    def _fetch_api_source(self, spec: TableSpec) -> list[Path]:
+        """Pull the API snapshot into the raw directory and return its file(s)."""
+
+        table_key = spec.name.split(".")[-1]
+        out_path = self.settings.raw_dir_for(table_key) / f"{table_key}.json"
+        path, _, _ = fetch_to_ndjson(
+            base_url=self.settings.api_url,
+            out_path=out_path,
+            string_fields=spec.string_columns,
+            search=spec.api_search or self.settings.api_search,
+            limit=self.settings.api_limit,
+            api_key=self.settings.api_key or None,
+        )
+        return [path]
 
     def _scan(self, files: list[Path]) -> pl.LazyFrame:
         frames: list[pl.LazyFrame] = []
@@ -333,6 +364,10 @@ class ExtractionPipeline:
             parsed = lf.select(_yyyymm_expr(spec.timestamp_column).is_not_null().mean()).collect()
             return float(parsed.item() or 0.0)
 
+        if spec.timestamp_format == "date":
+            parsed = lf.select(_date_expr(spec.timestamp_column).is_not_null().mean()).collect()
+            return float(parsed.item() or 0.0)
+
         string_ts = [c for c in spec.timestamp_columns if schema.get(c) == pl.String]
         if not string_ts:
             return None
@@ -354,6 +389,8 @@ class ExtractionPipeline:
             if column in df.columns:
                 if spec.timestamp_format == "yyyymm":
                     exprs.append(_yyyymm_expr(column))
+                elif spec.timestamp_format == "date":
+                    exprs.append(_date_expr(column))
                 else:
                     exprs.append(self._timestamp_expr(column, df.schema[column]))
         if exprs:

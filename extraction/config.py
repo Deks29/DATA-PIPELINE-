@@ -12,11 +12,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+# Load local .env (real environment variables take precedence over the file).
+load_dotenv(PROJECT_ROOT / ".env", override=False)
+
 ColumnKind = Literal["string", "timestamp", "integer", "float"]
-TimestampFormat = Literal["iso", "yyyymm"]
+TimestampFormat = Literal["iso", "yyyymm", "date"]
 WindowMode = Literal["trailing", "month"]
+SourceKind = Literal["file", "api"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,8 @@ class TableSpec:
     timestamp_format: TimestampFormat = "iso"
     window_mode: WindowMode = "trailing"
     allow_null_keys: bool = False
+    source: SourceKind = "file"
+    api_search: str | None = None
 
     @property
     def primary_key(self) -> str:
@@ -105,6 +113,38 @@ TABLES: dict[str, TableSpec] = {
     "hb_pitc": HB_PITC,
 }
 
+# openFDA device classification snapshot pulled from the REST API configured by
+# the ``API`` environment variable (see .env). The API has no event timestamp,
+# so the record carries the API's ``meta.last_updated`` date, and a monthly
+# window keeps the snapshot idempotent per business month.
+DEVICE_CLASSIFICATION = TableSpec(
+    name="staging.device_classification",
+    file_glob="device_classification.{ext}",
+    primary_keys=("product_code",),
+    timestamp_column="last_updated",
+    timestamp_format="date",
+    window_mode="month",
+    source="api",
+    api_search="product_code:NOB",
+    required_columns={
+        "product_code": "string",
+        "device_name": "string",
+        "device_class": "string",
+        "regulation_number": "string",
+        "medical_specialty_description": "string",
+        "review_panel": "string",
+        "implant_flag": "string",
+        "life_sustain_support_flag": "string",
+        "gmp_exempt_flag": "string",
+        "third_party_flag": "string",
+        "submission_type_id": "string",
+        "definition": "string",
+        "last_updated": "timestamp",
+    },
+)
+
+TABLES["device_classification"] = DEVICE_CLASSIFICATION
+
 # Section 1.2 - Source Format & Connection
 SUPPORTED_EXTENSIONS = ("csv", "json")
 
@@ -148,6 +188,12 @@ class Settings:
     rejected_ratio_threshold: float = 0.01
     max_retries: int = 3
 
+    # openFDA REST API source (device classification snapshot).
+    api_url: str = ""
+    api_search: str = "product_code:NOB"
+    api_limit: int = 500
+    api_key: str = ""
+
     def __post_init__(self) -> None:
         self.raw_dir = self.raw_dir or (self.base_dir / "data" / "raw")
         self.staging_dir = self.staging_dir or (self.base_dir / "data" / "staging")
@@ -187,6 +233,10 @@ def load_settings(**overrides) -> Settings:
         audit_retention_months=_env_int("SIGHTSYNC_AUDIT_RETENTION_MONTHS", 24),
         rejected_ratio_threshold=_env_float("SIGHTSYNC_REJECTED_RATIO_THRESHOLD", 0.01),
         max_retries=_env_int("SIGHTSYNC_MAX_RETRIES", 3),
+        api_url=os.environ.get("API", os.environ.get("SIGHTSYNC_API_URL", "")),
+        api_search=os.environ.get("API_SEARCH", os.environ.get("SIGHTSYNC_API_SEARCH", "product_code:NOB")),
+        api_limit=_env_int("API_LIMIT", _env_int("SIGHTSYNC_API_LIMIT", 500)),
+        api_key=os.environ.get("API_KEY", os.environ.get("SIGHTSYNC_API_KEY", "")),
     )
     for key, value in overrides.items():
         setattr(settings, key, value)

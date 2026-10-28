@@ -140,7 +140,7 @@ class PipelineTestCase(unittest.TestCase):
             [{"entity_id": "e1", "user_id": "user_1", "status": "active", "created_at": "2026-10-06T05:00:00Z"}]
         )
 
-        results = self.pipeline.run(BDATE)
+        results = self.pipeline.run(BDATE, tables=["raw_logs", "raw_entities"])
         by_table = {r.table_key: r for r in results}
 
         self.assertEqual(by_table["raw_logs"].decision, APPROVED)
