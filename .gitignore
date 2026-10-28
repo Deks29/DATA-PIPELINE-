@@ -21,3 +21,8 @@ standalone_admin_password.txt
 # OS
 Thumbs.db
 .DS_Store
+data/transformed/
+data/quarantine/
+transformation/_split/
+debug_orphan.py
+debug_out.txt
